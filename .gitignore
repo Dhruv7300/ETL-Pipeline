@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+data/tmp/
+*.parquet
+airflow.db
+logs/
+.venv_local/
+data*
+.pytest_tmp*
+unitycatalog-src*
