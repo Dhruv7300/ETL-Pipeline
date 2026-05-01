@@ -77,6 +77,8 @@ Build and start everything:
 docker compose up --build
 ```
 
+## Links to UIs
+
 Open:
 
 - MinIO console: <http://localhost:9001>
@@ -94,7 +96,7 @@ The MinIO init container creates these buckets:
 
 - `raw`
 - `iceberg`
-- `dlq`
+- ``dlq``
 
 The Unity Catalog bootstrap container creates or verifies:
 
