@@ -1,2 +1,5 @@
-websockets
-langgraph
+websocket-client>=1.0.0
+psycopg2-binary>=2.9.0
+tenacity>=8.0.0
+python-dotenv>=1.0.0
+websockets>=12.0
