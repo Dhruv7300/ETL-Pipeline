@@ -1,0 +1,187 @@
+x-lakehouse-env: &lakehouse-env
+  MINIO_ENDPOINT: http://minio:9000
+  MINIO_INTERNAL_ENDPOINT: http://minio:9000
+  MINIO_ACCESS_KEY: minioadmin
+  MINIO_SECRET_KEY: minioadmin
+  MINIO_REGION: us-east-1
+  RAW_BUCKET: raw
+  ICEBERG_BUCKET: iceberg
+  DLQ_BUCKET: dlq
+  ICEBERG_CATALOG: unity
+  ICEBERG_CATALOG_TYPE: rest
+  UC_CATALOG: unity
+  UC_SERVER_URL: http://unity-catalog:8080
+  UC_ICEBERG_REST_URI: http://unity-catalog:8080/api/2.1/unity-catalog/iceberg
+  UC_TOKEN: not_used
+  UC_REST_WAREHOUSE: unity
+  SPARK_REST_FALLBACK_TO_HADOOP: "true"
+  BRONZE_SCHEMA: bronze
+  SILVER_SCHEMA: silver
+  GOLD_SCHEMA: gold
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  environment:
+    <<: *lakehouse-env
+    AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/db/airflow.db
+    AIRFLOW_CONN_MINIO_S3: "aws://minioadmin:minioadmin@/?endpoint_url=http%3A%2F%2Fminio%3A9000&region_name=us-east-1"
+    AIRFLOW_CONN_SPARK_DEFAULT: '{"conn_type":"spark","host":"spark://spark-master","port":7077}'
+    AIRFLOW__WEBSERVER__SECRET_KEY: "local-dev-airflow-secret-key"
+    PYTHONPATH: /opt/airflow/project
+    SPARK_MASTER_URL: spark://spark-master:7077
+  volumes:
+    - ./orchestration:/opt/airflow/dags
+    - .:/opt/airflow/project
+    - airflow-db:/opt/airflow/db
+  depends_on:
+    minio-init:
+      condition: service_completed_successfully
+    unity-catalog-bootstrap:
+      condition: service_completed_successfully
+    spark-master:
+      condition: service_started
+
+services:
+  unity-catalog:
+    image: unitycatalog/unitycatalog:latest
+    ports:
+      - "8083:8080"
+    volumes:
+      - unitycatalog-data:/opt/unitycatalog/etc/data
+
+  unity-catalog-ui:
+    build:
+      context: .
+      dockerfile: docker/unity-catalog-ui/Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      unity-catalog:
+        condition: service_started
+
+  unity-catalog-bootstrap:
+    image: unitycatalog/unitycatalog:latest
+    restart: "no"
+    environment:
+      UC_BASE_URL: http://unity-catalog:8080
+      UC_CATALOG_NAME: unity
+    depends_on:
+      unity-catalog:
+        condition: service_started
+    command: ["/bin/bash", "/opt/bootstrap/bootstrap_uc_rest.sh"]
+    volumes:
+      - ./docker/unity-catalog-bootstrap:/opt/bootstrap:ro
+
+  minio:
+    image: minio/minio:RELEASE.2024-07-16T23-46-41Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-07-15T17-46-06Z
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done;
+      mc mb -p local/raw local/iceberg local/dlq;
+      printf '' | mc pipe local/raw/pending/.keep;
+      printf '' | mc pipe local/raw/processing/.keep;
+      printf '' | mc pipe local/raw/processed/.keep;
+      printf '' | mc pipe local/raw/failed/.keep;
+      printf '' | mc pipe local/dlq/invalid_json/.keep;
+      printf '' | mc pipe local/dlq/schema_errors/.keep;
+      printf '' | mc pipe local/dlq/silver_rejects/.keep;
+      exit 0;
+      "
+
+  spark-master:
+    hostname: spark-master
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    environment:
+      <<: *lakehouse-env
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: spark-master
+      SPARK_LOCAL_HOSTNAME: spark-master
+      PYTHONPATH: /opt/spark/project
+    ports:
+      - "7077:7077"
+      - "8082:8080"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      unity-catalog-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - .:/opt/spark/project
+
+  spark-worker:
+    hostname: spark-worker
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    environment:
+      <<: *lakehouse-env
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_LOCAL_HOSTNAME: spark-worker
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+      PYTHONPATH: /opt/spark/project
+    depends_on:
+      spark-master:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+      unity-catalog-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - .:/opt/spark/project
+
+  airflow-init:
+    <<: *airflow-common
+    user: "0:0"
+    command: >
+      bash -c "
+      mkdir -p /opt/airflow/db &&
+      chown -R airflow:0 /opt/airflow/db &&
+      runuser -u airflow -- airflow db migrate &&
+      (
+      runuser -u airflow -- airflow users create --username admin --password admin --firstname Data --lastname Engineer --role Admin --email admin@example.com || true
+      )
+      "
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8081:8080"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  minio-data:
+  airflow-db:
+  unitycatalog-data:
