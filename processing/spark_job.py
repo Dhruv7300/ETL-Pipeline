@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from config import settings
+from processing.uc_registrar import register_table_in_uc
 
 
 logging.basicConfig(
@@ -410,6 +411,7 @@ def append_iceberg_table(spark, layer: str, table_name: str, df, partition_colum
         except Exception as exc:
             logger.error("Append failed for %s: %s", full_table_name, exc)
             raise
+        register_table_in_uc(layer, table_name)
         return
 
     try:
@@ -424,6 +426,7 @@ def append_iceberg_table(spark, layer: str, table_name: str, df, partition_colum
             )
             df.writeTo(full_table_name).append()
             logger.info("Created and appended rows to %s", full_table_name)
+            register_table_in_uc(layer, table_name)
             return
 
         writer = df.writeTo(full_table_name).using("iceberg").tableProperty("location", table_location(layer, table_name))
@@ -431,6 +434,7 @@ def append_iceberg_table(spark, layer: str, table_name: str, df, partition_colum
             writer = writer.partitionedBy(*partition_columns)
         writer.create()
         logger.info("Created Iceberg table %s", full_table_name)
+        register_table_in_uc(layer, table_name)
     except Exception as exc:
         logger.error("Table create/append failed for %s: %s", full_table_name, exc)
         if settings.ICEBERG_CATALOG_TYPE == "rest" and active_catalog_name() == settings.UC_CATALOG:
@@ -462,6 +466,7 @@ def replace_iceberg_table(spark, layer: str, table_name: str, df, partition_colu
             spark.sql(f"TRUNCATE TABLE {full_table_name}")
             df.writeTo(full_table_name).append()
             logger.info("Replaced Iceberg table %s", full_table_name)
+            register_table_in_uc(layer, table_name)
             return
 
         writer = df.writeTo(full_table_name).using("iceberg").tableProperty("location", table_location(layer, table_name))
@@ -469,6 +474,7 @@ def replace_iceberg_table(spark, layer: str, table_name: str, df, partition_colu
             writer = writer.partitionedBy(*partition_columns)
         writer.createOrReplace()
         logger.info("Replaced Iceberg table %s", full_table_name)
+        register_table_in_uc(layer, table_name)
     except Exception as exc:
         logger.error("Table replace failed for %s: %s", full_table_name, exc)
         raise
